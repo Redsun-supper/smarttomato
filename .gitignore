@@ -1,0 +1,25 @@
+# 敏感信息：切勿提交 API Key 与密码
+.env
+*.key
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 本地 Agent 内部状态（非项目代码）
+.workbuddy-ai/
+
+# 运行时产物
+*.log
+captures/
+shots/
