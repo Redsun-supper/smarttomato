@@ -12,7 +12,8 @@
     这样坐标就仍然按横屏直觉来写，不需要做任何坐标换算。
 
 运行环境：
-    Mind+ 内置 Python（已含 unihiker 0.0.27 + Pillow），或行空板 M10 板载 Python。
+    Mind+ 内置 Python 3.11.9（已含 unihiker 0.0.27 + Pillow），或行空板 M10 板载
+    Python 3.7.3 + Pillow 9.0.1。代码已对 Pillow < 10 做兼容，板上可直接运行。
 
 放置位置：
     Mind+ → Python 积木模式 → 项目「新建项目」→ 该文件即项目下的 main.py
@@ -54,9 +55,12 @@ def find_font():
         candidates.append(os.path.join(os.path.dirname(_unihiker.__file__), "HYQiHei_50S.ttf"))
     except Exception:
         pass
-    # 兜底：当前目录 / 常见系统字体
+    # 兜底：当前目录 / 系统常见字体（含中文，适配行空板 Debian 10 / Pillow 9.x）
     candidates.append("HYQiHei_50S.ttf")
     candidates.append("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    candidates.append("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")            # 文泉驿正黑
+    candidates.append("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")   # Noto 思源黑体
+    candidates.append("/usr/share/fonts/truetype/arphic/uming.ttc")               # 文鼎明体
     for path in candidates:
         if path and os.path.exists(path):
             return path
@@ -69,10 +73,11 @@ FONT_PATH = find_font()
 def make_font(size):
     if FONT_PATH:
         return ImageFont.truetype(FONT_PATH, size)
+    # 无字体文件兜底：Pillow < 10（如板载 9.0.1）的 load_default 不接受 size 参数，需兼容
     try:
         return ImageFont.load_default(size)      # Pillow >= 10
     except TypeError:
-        return ImageFont.load_default()
+        return ImageFont.load_default()          # Pillow < 10 回退到默认位图字体
 
 
 def draw_center(draw, cx, cy, text, font, fill):

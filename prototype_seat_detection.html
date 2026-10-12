@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<!--
+  设计系统：SmartTomato · DESIGN.md（Phase 2 设计令牌冻结版）
+  方案 A —— 白底深青基线（品牌提取）+ Modern Minimal 结构
+  形态说明：本文件不是网页产品界面，而是「行空板 M10 板载 2.8 寸 IPS 屏」的
+  1:1 设备屏模拟器。每个「屏幕」= 320×240 横屏逻辑画布，内容全部只用
+  Pillow 可绘制图元（矩形 / 圆角矩形 / 圆 / 直线 / 文字）构成。
+  禁止：渐变 / 阴影 / 模糊 / 毛玻璃 / emoji / 图标字体 / 外部图片 / 画布内交互控件。
+  令牌来源：DESIGN.md §2 色彩 · §3 字号 · §5 间距 · §4.6 三档强度升级矩阵
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmartTomato · 行空板 M10 设备屏模拟原型（320×240）</title>
+<style>
+  /* =====================================================================
+     DESIGN.md §9.3 Quick Reference —— 令牌原样落地为 CSS 变量
+     ===================================================================== */
+  :root{
+    /* 色彩 */
+    --color-bg:#FFFFFF;
+    --color-text-secondary:#546E7A;
+    --color-track:#CFD8DC;
+    --color-hairline:#E0E0E0;
+    --color-on-tier:#FFFFFF;
+    /* 四态语义色 */
+    --tier-focus:#00838F;
+    --tier-l1:#1565C0;
+    --tier-l2:#A85E00;
+    --tier-l2-text:#9A5B00;
+    --tier-l3:#C2185B;
+    --color-recover:#2E7D32;
+    /* 字体栈（设备板载字体，浏览器内近似，禁止 web 字体） */
+    --font-cn:"HYQiHei 50S","PingFang SC","Microsoft YaHei",sans-serif;
+    --font-num:"DejaVu Sans","Helvetica Neue",Arial,sans-serif;
+    /* 展示缩放（仅影响观感，画布内部尺寸恒为 320×240） */
+    --scale:2;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{
+    background:#E9EBEC;                 /* 页面底色（画布之外，非设备屏内容） */
+    color:#263238;
+    font-family:var(--font-cn);
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ================= 页面头部 ================= */
+  .page-head{padding:26px 32px 4px;}
+  .page-head h1{
+    margin:0 0 8px;font-size:19px;font-weight:600;letter-spacing:.02em;
+  }
+  .page-head p{
+    margin:0;max-width:860px;font-size:13px;line-height:1.65;
+    color:var(--color-text-secondary);
+  }
+  .page-head p .tag{
+    display:inline-block;padding:1px 7px;margin-right:6px;border-radius:3px;
+    background:#263238;color:#fff;font-size:11px;letter-spacing:.04em;vertical-align:1px;
+  }
+
+  /* ================= 工具条（控件都在屏幕之外） ================= */
+  .toolbar{
+    position:sticky;top:0;z-index:20;
+    display:flex;flex-wrap:wrap;align-items:center;gap:14px;
+    padding:12px 32px;
+    background:#E9EBEC;
+    border-bottom:2px solid var(--color-track);
+  }
+  .seg{display:inline-flex;border:2px solid #B0BEC5;border-radius:5px;overflow:hidden;}
+  .seg .btn{border:none;border-radius:0;border-right:2px solid #B0BEC5;}
+  .seg .btn:last-child{border-right:none;}
+  .btn{
+    font-family:var(--font-cn);font-size:13px;line-height:1;
+    padding:8px 14px;border:2px solid #B0BEC5;border-radius:5px;
+    background:#fff;color:#263238;cursor:pointer;transition:background .15s,border-color .15s,color .15s;
+  }
+  .btn:hover{border-color:#546E7A;}
+  .btn.active,.btn.primary{background:#263238;color:#fff;border-color:#263238;}
+  .btn.primary:hover{background:#37474F;}
+  .toolbar .status{
+    font-size:12.5px;color:var(--color-text-secondary);margin-left:auto;
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* ================= 屏幕舞台 ================= */
+  .stage{
+    display:flex;flex-wrap:wrap;gap:44px 40px;
+    padding:30px 32px 72px;align-items:flex-start;
+  }
+  .slot{margin:0;transition:opacity .35s ease;}
+  .slot.dim{opacity:.28;}
+
+  /* 画布外壳：加 2px 边框仅用于观感，不影响内部 320×240 尺寸 */
+  .screen-wrap{
+    width:calc(320px * var(--scale));
+    height:calc(240px * var(--scale));
+    border:2px solid var(--color-track);
+    background:var(--color-bg);
+    outline:3px solid transparent;outline-offset:4px;
+    transition:outline-color .25s ease;
+  }
+  .slot.active .screen-wrap{outline-color:#263238;}
+  /* 画布本体：内部坐标严格 320×240，靠 transform 放大显示 */
+  .screen{
+    width:320px;height:240px;
+    transform:scale(var(--scale));transform-origin:top left;
+    display:block;
+  }
+
+  /* 说明文字 */
+  .slot figcaption{margin-top:12px;width:calc(320px * var(--scale));}
+  .cap-name{display:block;font-size:14px;font-weight:600;color:#263238;}
+  .cap-name em{
+    font-style:normal;font-weight:400;font-size:12px;color:var(--color-text-secondary);
+    margin-left:6px;
+  }
+  .cap-ch{
+    display:block;margin-top:5px;font-size:11.5px;line-height:1.7;
+    color:var(--color-text-secondary);
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* ================= SVG 文本字体类 ================= */
+  .cn{font-family:var(--font-cn);}
+  .num{font-family:var(--font-num);}
+
+  /* ================= 动效（节奏通道，Pillow 以明度/色阶变化模拟） ================= */
+  @keyframes breathe{0%,100%{opacity:1}50%{opacity:.55}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+  .cam-breathe{animation:breathe 2s ease-in-out infinite;}   /* 专注：2s 缓慢呼吸 */
+  .pulse-l1{animation:pulse 4s ease-in-out infinite;}        /* L1：4s 轻脉冲 */
+  .pulse-l2{animation:pulse 1.5s ease-in-out infinite;}      /* L2：1.5s 脉冲 */
+  .pulse-l3{animation:pulse 1s ease-in-out infinite;}        /* L3：1s 脉冲（=1Hz 上限） */
+
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none !important;}
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ 页头说明 ============================ -->
+<header class="page-head">
+  <h1>SmartTomato · 行空板 M10 设备屏模拟原型</h1>
+  <p>
+    <span class="tag">设备屏 · 非网页</span>
+    这是行空板 M10 板载 2.8 寸 IPS 屏（物理 240×320 竖屏，横屏使用 → 逻辑画布 <b>320×240</b>）的
+    <b>1:1 模拟原型</b>，不是网页产品界面。每屏内容全部只用 Pillow 可绘制图元（矩形 / 圆角矩形 / 圆 / 直线 / 文字）构成，
+    零渐变、零阴影、零模糊、零图标字体。屏幕本身不含任何可点击控件——设备靠物理按键 A / B / Home 操作。
+    设计令牌来自 DESIGN.md（Phase 2 冻结版 · 方案 A 白底深青基线）。
+  </p>
+</header>
+
+<!-- ============================ 工具条（屏幕之外） ============================ -->
+<div class="toolbar">
+  <span style="font-size:12.5px;color:var(--color-text-secondary);">缩放</span>
+  <div class="seg">
+    <button class="btn scale-btn" data-scale="1">1×</button>
+    <button class="btn scale-btn active" data-scale="2">2×</button>
+  </div>
+  <button class="btn primary" id="playBtn">播放离座过程</button>
+  <span class="status" id="status">待机 · 6 个状态静态并排展示</span>
+</div>
+
+<!-- ============================ 屏幕舞台 ============================ -->
+<main class="stage" id="stage">
+
+  <!-- ① 待机时钟（基线，与现有 m10_landscape_clock.py 一致） -->
+  <figure class="slot" data-state="clock" data-label="待机时钟">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="待机时钟">
+        <rect x="0" y="0" width="320" height="240" fill="#FFFFFF"/>
+        <!-- 时间：62px DejaVuSans-Bold · #00838F，锚点 (160,95)，与基线一致 -->
+        <text class="num" x="160" y="95" font-size="62" font-weight="bold" fill="#00838F"
+              text-anchor="middle" dominant-baseline="central">13:29:45</text>
+        <!-- 日期+星期：18px 中文栈 · #546E7A，锚点 (160,172)，与基线一致 -->
+        <text class="cn" x="160" y="172" font-size="18" fill="#546E7A"
+              text-anchor="middle" dominant-baseline="central">2026年10月11日  星期日</text>
+        <!-- 相机监督信号（常驻唯一元素，锚点中心 294,16，14×12）
+             待机态：静止、不做呼吸动画，降调灰蓝 #546E7A，区别于专注态青色呼吸点 -->
+        <g fill="#546E7A">
+          <rect x="292" y="8" width="4" height="2"/>                         <!-- 取景器凸块 4×2 -->
+          <!-- 机身 14×12 r2（2px 描边） -->
+          <rect x="287" y="10" width="14" height="12" rx="2"
+                fill="none" stroke="#546E7A" stroke-width="2"/>
+          <circle cx="291" cy="16" r="2.5"/>                                 <!-- 镜头 r2.5 -->
+          <circle cx="300" cy="21" r="1.5"/>                                 <!-- 状态点 r1.5 -->
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">① 待机时钟 <em>基线参照</em></span>
+      <span class="cap-ch">色相 青#00838F（品牌基线） · 填充 最小 · 元素 1 · 节奏 静 · 语音 静默 · 计时 未启动</span>
+    </figcaption>
+  </figure>
+
+  <!-- ② 专注中 -->
+  <figure class="slot" data-state="focus" data-label="专注中">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="专注中">
+        <rect x="0" y="0" width="320" height="240" fill="#FFFFFF"/>
+
+        <!-- 相机监督信号（右上常驻，锚点中心 294,16，14×12，专注青，2s 呼吸） -->
+        <g class="cam-breathe" fill="#00838F">
+          <rect x="292" y="8" width="4" height="2"/>                         <!-- 取景器凸块 4×2 -->
+          <rect x="287" y="10" width="14" height="12" rx="2"/>               <!-- 机身 14×12 r2 -->
+          <circle cx="291" cy="16" r="2.5" fill="#FFFFFF"/>                  <!-- 镜头 r2.5（镂空） -->
+          <circle cx="300" cy="21" r="1.5" fill="#FFFFFF"/>                  <!-- 状态点 r1.5 -->
+        </g>
+
+        <!-- 辅助标签：专注中 -->
+        <text class="cn" x="12" y="20" font-size="14" fill="#546E7A"
+              dominant-baseline="central">专注中</text>
+
+        <!-- 计时主显：54px DejaVuSans-Bold · 专注青 -->
+        <text class="num" x="160" y="118" font-size="54" font-weight="bold" fill="#00838F"
+              text-anchor="middle" dominant-baseline="central">23:45</text>
+        <text class="cn" x="160" y="156" font-size="14" fill="#546E7A"
+              text-anchor="middle" dominant-baseline="central">剩余时间</text>
+
+        <!-- 进度指示（底部 y=236 满宽 4px；底槽 track + 已完成 40% 专注青） -->
+        <rect x="0" y="236" width="320" height="4" fill="#CFD8DC"/>
+        <rect x="0" y="236" width="128" height="4" fill="#00838F"/>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">② 专注中 <em>计时运行</em></span>
+      <span class="cap-ch">色相 青#00838F · 填充 仅相机信号 14×12 · 元素 1 · 节奏 2s 呼吸 · 语音 静默 · 计时 运行中</span>
+    </figcaption>
+  </figure>
+
+  <!-- ③ 离座 · 轻提醒（60s ~ 3min） -->
+  <figure class="slot" data-state="l1" data-label="离座 · 轻提醒（60s–3min）">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="离座轻提醒">
+        <rect x="0" y="0" width="320" height="240" fill="#FFFFFF"/>
+
+        <!-- 相机信号换色为 L1 蓝，4s 轻脉冲 -->
+        <g class="pulse-l1" fill="#1565C0">
+          <rect x="292" y="8" width="4" height="2"/>
+          <rect x="287" y="10" width="14" height="12" rx="2"/>
+          <circle cx="291" cy="16" r="2.5" fill="#FFFFFF"/>
+          <circle cx="300" cy="21" r="1.5" fill="#FFFFFF"/>
+        </g>
+
+        <!-- 状态提示条（满宽 320×28 直角，L1 蓝，反白单行） -->
+        <rect x="0" y="106" width="320" height="28" fill="#1565C0"/>
+        <text class="cn" x="160" y="120" font-size="18" fill="#FFFFFF"
+              text-anchor="middle" dominant-baseline="central">同学，你还在吗？</text>
+
+        <!-- 底部细条：4px 细条变 L1 蓝 -->
+        <rect x="0" y="236" width="320" height="4" fill="#CFD8DC"/>
+        <rect x="0" y="236" width="140" height="4" fill="#1565C0"/>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">③ 离座 · 轻提醒 <em>60s – 3min</em></span>
+      <span class="cap-ch">色相 蓝#1565C0 · 填充 满宽提示条 320×28 · 元素 2 · 节奏 4s 脉冲 · 语音 单次轻提示 · 计时 运行</span>
+    </figcaption>
+  </figure>
+
+  <!-- ④ 离座 · 中提醒（3 ~ 5min） -->
+  <figure class="slot" data-state="l2" data-label="离座 · 中提醒（3–5min）">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="离座中提醒">
+        <rect x="0" y="0" width="320" height="240" fill="#FFFFFF"/>
+
+        <!-- 相机信号换色为 L2 琥珀，1.5s 脉冲 -->
+        <g class="pulse-l2" fill="#A85E00">
+          <rect x="292" y="8" width="4" height="2"/>
+          <rect x="287" y="10" width="14" height="12" rx="2"/>
+          <circle cx="291" cy="16" r="2.5" fill="#FFFFFF"/>
+          <circle cx="300" cy="21" r="1.5" fill="#FFFFFF"/>
+        </g>
+
+        <!-- 顶部 28px 色带（直角，L2 琥珀，反白单行） -->
+        <rect x="0" y="32" width="320" height="28" fill="#A85E00"/>
+        <text class="cn" x="160" y="46" font-size="18" fill="#FFFFFF"
+              text-anchor="middle" dominant-baseline="central">请回到座位</text>
+
+        <!-- 人形符号（头 r6 + 身体 20×14 r4），L2 琥珀，1.5s 脉冲 -->
+        <g class="pulse-l2" fill="#A85E00">
+          <circle cx="160" cy="96" r="6"/>
+          <rect x="150" y="104" width="20" height="14" rx="4"/>
+        </g>
+
+        <!-- 离座时长（28px DejaVuSans-Bold，白底文字用 --tier-l2-text #9A5B00）+ 标签 -->
+        <text class="num" x="160" y="150" font-size="28" font-weight="bold" fill="#9A5B00"
+              text-anchor="middle" dominant-baseline="central">03:32</text>
+        <text class="cn" x="160" y="176" font-size="12" fill="#546E7A"
+              text-anchor="middle" dominant-baseline="central">离座时长</text>
+
+        <!-- 底部细条变 L2 琥珀 -->
+        <rect x="0" y="236" width="320" height="4" fill="#CFD8DC"/>
+        <rect x="0" y="236" width="170" height="4" fill="#A85E00"/>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">④ 离座 · 中提醒 <em>3 – 5min</em></span>
+      <span class="cap-ch">色相 琥珀#A85E00 · 填充 提示条 + 主区人形 · 元素 3 · 节奏 1.5s 脉冲 · 语音 单次 + 一次重复 · 计时 累计偏离</span>
+    </figcaption>
+  </figure>
+
+  <!-- ⑤ 离座 · 强提醒（> 5min） -->
+  <figure class="slot" data-state="l3" data-label="离座 · 强提醒（&gt;5min）">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="离座强提醒">
+        <!-- 整屏反色填充：背景 = 品红，前景全部反白 -->
+        <rect x="0" y="0" width="320" height="240" fill="#C2185B"/>
+
+        <!-- 顶部辅助信息（反白） -->
+        <text class="cn" x="12" y="20" font-size="14" fill="#FFFFFF"
+              dominant-baseline="central">离座已超 5 分钟</text>
+
+        <!-- 相机信号放大（约 1.4×，反白），1s 脉冲（≤1Hz 上限） -->
+        <g class="pulse-l3" fill="#FFFFFF"
+           transform="translate(294,16) scale(1.4) translate(-294,-16)">
+          <rect x="292" y="8" width="4" height="2"/>
+          <rect x="287" y="10" width="14" height="12" rx="2"/>
+          <circle cx="291" cy="16" r="2.5" fill="#C2185B"/>
+          <circle cx="300" cy="21" r="1.5" fill="#C2185B"/>
+        </g>
+
+        <!-- 人形符号（反白，1s 脉冲） -->
+        <g class="pulse-l3" fill="#FFFFFF">
+          <circle cx="160" cy="72" r="6"/>
+          <rect x="150" y="80" width="20" height="14" rx="4"/>
+        </g>
+
+        <!-- 大号秒数（62px DejaVuSans-Bold 反白） -->
+        <text class="num" x="160" y="134" font-size="62" font-weight="bold" fill="#FFFFFF"
+              text-anchor="middle" dominant-baseline="central">05:24</text>
+
+        <!-- 「计时已暂停」标记：双竖条 + 文字（反白，1s 脉冲） -->
+        <g class="pulse-l3" fill="#FFFFFF">
+          <rect x="105" y="176" width="6" height="18"/>
+          <rect x="117" y="176" width="6" height="18"/>
+          <text class="cn" x="135" y="185" font-size="18" fill="#FFFFFF"
+                dominant-baseline="central">计时已暂停</text>
+        </g>
+
+        <!-- 底部进度：冻结（保持比例），白段 = 冻结位置，底槽与背景同色融为一体 -->
+        <rect x="0" y="236" width="200" height="4" fill="#FFFFFF"/>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">⑤ 离座 · 强提醒 <em>&gt; 5min</em></span>
+      <span class="cap-ch">色相 品红#C2185B · 填充 近全屏反色 · 元素 4 · 节奏 1s 脉冲（≤1Hz） · 语音 连续递增 · 计时 冻结暂停</span>
+    </figcaption>
+  </figure>
+
+  <!-- ⑥ 回座恢复 -->
+  <figure class="slot" data-state="recover" data-label="回座恢复">
+    <div class="screen-wrap">
+      <svg class="screen" viewBox="0 0 320 240" width="320" height="240" role="img" aria-label="回座恢复">
+        <!-- 全屏绿色反馈帧（1.5s） -->
+        <rect x="0" y="0" width="320" height="240" fill="#2E7D32"/>
+        <!-- 绿色对勾：两条粗线（线宽 8px ≥4px） -->
+        <polyline points="132,122 152,144 192,92" fill="none" stroke="#FFFFFF"
+                  stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        <!-- 欢迎回来：24px 中文栈 · 反白 -->
+        <text class="cn" x="160" y="180" font-size="24" font-weight="bold" fill="#FFFFFF"
+              text-anchor="middle" dominant-baseline="central">欢迎回来</text>
+      </svg>
+    </div>
+    <figcaption>
+      <span class="cap-name">⑥ 回座恢复 <em>1.5s 反馈帧</em></span>
+      <span class="cap-ch">色相 绿#2E7D32 · 填充 全屏反馈帧 · 元素 对勾 + 文字 · 节奏 静 · 语音 单次 · 计时 恢复运行</span>
+    </figcaption>
+  </figure>
+
+</main>
+
+<script>
+  /* ================= 缩放切换（1× / 2×，默认 2×） ================= */
+  var root = document.documentElement;
+  var scaleBtns = document.querySelectorAll('.scale-btn');
+  scaleBtns.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var s = btn.getAttribute('data-scale');
+      root.style.setProperty('--scale', s);
+      scaleBtns.forEach(function(b){ b.classList.toggle('active', b === btn); });
+    });
+  });
+
+  /* ================= 播放离座过程：专注 → 轻 → 中 → 强 → 回座 ================= */
+  var slots = Array.prototype.slice.call(document.querySelectorAll('.slot'));
+  var statusEl = document.getElementById('status');
+  var playBtn = document.getElementById('playBtn');
+  var playing = false;
+  var timer = null;
+
+  /* 时间轴（毫秒）：与各档节奏呼应，强档停留最久以便观察 */
+  var sequence = [
+    { state:'focus',   hold:2200 },
+    { state:'l1',      hold:2600 },
+    { state:'l2',      hold:2600 },
+    { state:'l3',      hold:3000 },
+    { state:'recover', hold:1800 }
+  ];
+
+  function slotByState(s){
+    return slots.filter(function(el){ return el.getAttribute('data-state') === s; })[0];
+  }
+
+  function clearHighlights(){
+    slots.forEach(function(el){
+      el.classList.remove('active');
+      el.classList.remove('dim');
+    });
+  }
+
+  function play(){
+    if (playing) return;
+    playing = true;
+    playBtn.classList.add('active');
+
+    /* 播放期间：全部压暗，仅高亮当前帧 */
+    slots.forEach(function(el){ el.classList.add('dim'); });
+
+    var i = 0;
+    function step(){
+      /* 清掉上一帧高亮 */
+      slots.forEach(function(el){ el.classList.remove('active'); });
+
+      if (i >= sequence.length){
+        clearHighlights();
+        playing = false;
+        playBtn.classList.remove('active');
+        statusEl.textContent = '播放完成 · 三档强度已依次升级（青 → 蓝 → 琥珀 → 品红 → 绿）';
+        return;
+      }
+
+      var cur = slotByState(sequence[i].state);
+      cur.classList.remove('dim');
+      cur.classList.add('active');
+      statusEl.textContent = '▶ ' + cur.getAttribute('data-label');
+
+      timer = setTimeout(step, sequence[i].hold);
+      i++;
+    }
+    step();
+  }
+
+  playBtn.addEventListener('click', play);
+</script>
+
+</body>
+</html>
