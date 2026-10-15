@@ -95,7 +95,12 @@
 
 ## 用法
 
+> ⚠️ 本段程序已归档到 `old/`，以下命令需在 `old/` 目录下执行
+> （或在仓库根目录把 `m10_step2_focus_last.py` 改成 `old/m10_step2_focus_last.py`）。
+> **当前上板程序是 `m10_step3_away_last.py`。**
+
 ```bash
+cd old
 python3 m10_step2_focus_last.py                     # 正常跑：说「开始学习」触发
 python3 m10_step2_focus_last.py --demo              # 8 秒后自动触发一次
 python3 m10_step2_focus_last.py --no-voice          # 不初始化语音模块（纯屏幕）
