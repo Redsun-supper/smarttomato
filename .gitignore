@@ -23,3 +23,19 @@ Thumbs.db
 *.log
 captures/
 shots/
+
+# 照片 / 截图：一律不提交（全部收在 photo/ 里，仅本地留存）
+# 注意 .gitignore 只管「未跟踪」文件；已跟踪的要额外 `git rm --cached` 才会脱管。
+photo/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+
+# 本地备份：回滚用，不进仓库
+*.bak
+*.bak_*
+*.orig
+*.rej
