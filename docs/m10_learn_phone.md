@@ -140,15 +140,21 @@ python3 -u husky_learn_phone.py --load 1     # 晚上
 
 ---
 
-## 4.5 按键式学习：按 A 启停，每按 B 学一张
+## 4.5 按键式学习（常驻服务）：按 A 启停，每按 B 学一张
 
-工具 `tools/husky_learn_hold.py`（板上 `/root/smarttomato/husky_learn_hold.py`）。
+工具 `tools/husky_learn_hold.py`（板上 `/root/smarttomato/husky_learn_hold.py`），
+systemd 服务名 **`husky-learn`**。**按官方库接口写**：`command_request_algorthim` /
+`command_request_learn_once` / `command_request_blocks` + `read_count("blocks")` /
+`read_learned_id_count`，不自己拼协议帧。
+
+> 需要自定义协议（快读、中文起名、批量连学）时用 `tools/husky_learn_phone.py`，
+> 它是独立的一次性工具，见 §4。
 
 **为什么不用二哈自己的学习键**：那个键在模块本地，**I2C 协议读不到它的状态**
 （协议里没有「读按键」指令，`0x2C` 那个 KNOCK 是心跳不是按键，库里还被注释掉了）。
 所以拿 M10 自己的 A/B 键当开关 —— 设备 `/dev/input/event2`（名字 `keyboard_ab`）。
 
-### 按键 code 已确定
+### 按键 code
 
 从设备位图 `KEY=1000050000000` 推出，置位在 bit 28 / 30 / 48：
 
@@ -158,25 +164,53 @@ python3 -u husky_learn_phone.py --load 1     # 晚上
 | **B** | **48** | `KEY_B` |
 | Home | 28 | `KEY_ENTER` |
 
-不确定就跑 `--probe` 现场确认（只读按键，不碰 I2C）。
-
-### 用法
+### 部署 / 启停（本机一条命令）
 
 ```bash
-# 手动模式（默认）：按 A 开始，每按 B 学一张，再按 A 停止
-python3 -u husky_learn_hold.py --id 1
-
-# 按住模式：按一下开始（立刻学第一张，之后每 1 秒一张），再按一下停
-python3 -u husky_learn_hold.py --id 1 --mode hold --interval 1.0
-
-# 其它
-python3 -u husky_learn_hold.py --probe                    # 探按键 code
-python3 -u husky_learn_hold.py --id 1 --key-a 30 --key-b 48
-python3 -u husky_learn_hold.py --id 1 --auto-save 0       # 退出时自动存槽 0
+cd tools
+python deploy_husky_learn.py              # 上传脚本 + 装服务 + 启动
+python deploy_husky_learn.py --status     # 看状态 / 日志尾部
+python deploy_husky_learn.py --stop       # 停服务（SIGTERM → os._exit，干净退出）
+python deploy_husky_learn.py --no-start   # 只部署不启动
+python deploy_husky_learn.py --enable     # 额外设开机自启（⚠️ 见 §7.5，慎用）
 ```
 
-**手动模式的优势**：每张都是你**摆好姿势再按 B**，换 App / 换角度 / 换光线
-都能精确控制，不像定时模式那样盲拍。B 键在未开启状态下按了只会提示「先按 A 键」。
+板上等价操作：`systemctl start|stop|status husky-learn`，日志 `/root/smarttomato/learn.log`。
+服务单元里固定带 `--no-switch`（模块已在物体分类，切算法是本板的 panic 触发点，见 §7.5）。
+
+### 操作
+
+| 动作 | 效果 |
+|---|---|
+| **按 A** | 空闲 ↔ 学习 切换（**不会退出进程**，可反复做多轮） |
+| **按 B**（学习中） | 学一张到 ID 1，日志打 `[n] 已学 → ID 1` |
+| **按 B**（空闲时） | 只提示「先按 A 键」，不误学 |
+
+### 屏幕（240×320）显示什么
+
+服务里有 `Environment=DISPLAY=:0`，用 `unihiker.GUI` + Pillow 直接画，只在内容变化时重绘：
+
+```
+学手机 · ID 1
+    学习中            ← 学习中=青色 + 顶部青色条；待命=灰色
+      12              ← 本次已学张数（大字）
+   本次已学（张）
+● 看到目标            ← 二哈检测到目标亮绿；没检测到是灰色空心圆
+模块已学 ID：1
+A 开始/结束   B 学一张
+```
+
+`● 看到目标` 是最有用的一行：它说明**当前这一帧二哈确实看到了东西**，
+此时按 B 才学得到有效样本；一直是空心圆就说明手机没进画面中心的大框。
+
+### 与旧版的差别
+
+| 旧版 | 新版 |
+|---|---|
+| 按 A 停止 → 进程退出 → 板子 panic | 按 A 只切状态，进程常驻；退出走 `os._exit` |
+| 学的时候看不到状态，只能回头翻日志 | 屏幕实时显示：状态 / 已学张数 / 是否看到目标 |
+| 每次只读一个按键事件，连按会丢键 | 一次排空多个事件 |
+| 启动就要切算法 | 默认由服务带 `--no-switch`，不碰这条 panic 触发点 |
 
 ⚠️ 官方建议每个类别 30 张以上。
 
@@ -267,3 +301,64 @@ python3 -u husky_learn_phone.py --load 0      # 需要时随时恢复
 - **SD 卡必须 FAT32**。2026-10-16 实测：插上二哈 2 代用过的（多半 exFAT/ext4）卡，
   模块会**卡在启动流程** —— 屏幕亮着、线也紧，但 **I2C 完全不响应**（0x32 消失），
   极易误判成「模块坏了 / 线松了」。**拔卡即恢复**，插卡前先确认格式。
+
+---
+
+## 7.5 🔴 内核 panic 的定位结论（2026-10-17，反复复现）
+
+### 现象
+
+板子会在**起 pinpong 进程后的几秒到一分钟内**整机重启（SSH 断、约 40 秒恢复）。
+`/proc/uptime` 归零 = 真的重启过，不是网络抖动。
+
+内核日志（`journalctl -b -1`）在重启前留下：
+
+```
+kernel: config_open 61 count = 1
+kernel: SPI1 driver loaded-------------------------
+kernel: read gpio state error-----------------
+kernel: write fail
+kernel: rx_len = 0
+kernel: Unable to handle kernel paging request at virtual address ffffff0000008f1e
+kernel: Internal error: Oops: 96000004 [#1] PREEMPT SMP
+```
+
+即：**gd32v（协处理器）这条 SPI 链路写失败，而 `pinpong_linux_module` 在错误路径上
+解引用了野指针 → paging fault**。这是内核模块的 bug，用户态无法捕获，只能规避。
+
+### 三个已确认的触发点
+
+| 触发点 | 证据 |
+|---|---|
+| **发「切算法」指令（0x2D）** | 5 次崩溃全部落在 `切到「物体分类」…` 之后几秒内 —— 二哈重载模型期间 NAK/拉总线，首包就失败 |
+| **进程退出** | 普通 `return` / `sys.exit()` 退出后 15 秒内板子失联；改 `os._exit()` 后同一脚本退出后板子始终在线 |
+| **任何 I2C 读失败** | 一次读失败（`write fail / rx_len = 0`）就可能触发，无法预判 |
+
+### 结论与对策
+
+1. **进程必须常驻**：本版所有退出路径走 `os._exit()`，按 A 只切状态不退出。
+2. **服务启动时带 `--no-switch`**：模块上手动选好「物体分类」，脚本就不发这条指令；
+   手动跑脚本时才由 `--no-switch` 决定切不切。
+3. **不要 `Restart=always`**：重启即重新配置 gd32v，容易进「起来就 panic、panic 又重启」的循环。
+   服务挂了就整机重启，别自动重试。
+4. **整机重启 ≠ 冷启动**：gd32v 由 5V 常供电，`reboot` 不会给它掉电复位。
+   一旦它被留在坏状态（例如切算法被打断），**只有拔 Type-C 冷启动**能恢复 ——
+   这也是「重启后怎么都起不来，拔电插上就好了」的真正原因。
+
+### 板子起不来的排查顺序
+
+```bash
+# 1) 空载稳定吗？（无 pinpong 进程时 uptime 持续增长 = 板子本身没坏）
+cat /proc/uptime
+# 2) 有没有残留进程占着 I2C？
+ps -eo pid,args | grep '[h]usky_learn_hold'
+# 3) 模块在不在总线上（这一步不加载 SPI1，安全）
+i2cdetect -y 4 | grep 32
+# 4) 看上一次崩溃的内核日志
+journalctl -b -1 --no-pager | tail -30
+```
+
+若第 1 步空载稳定、第 3 步 0x32 在，但一起进程就崩 → **拔 Type-C 冷启动**，
+同时把二哈的 4Pin 线也拔插一次（模块被打断在「重载模型」状态时也会一直 NAK）。
+冷启动后等约 1 分钟再 `systemctl start husky-learn`。
+

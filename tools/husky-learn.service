@@ -1,0 +1,25 @@
+[Unit]
+Description=smarttomato 二哈「学手机」常驻学习守护（M10 A/B 键操作）
+Documentation=file:/root/smarttomato/docs/m10_learn_phone.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/smarttomato
+# unihiker.GUI 走 Tk，必须有 DISPLAY，否则画不到屏幕（TclError: no display name）
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/var/run/lightdm/root/:0
+# 等 rc.local 里的 anaysis.py 把 pinpong_linux_module 配置完再起
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/python3 -u /root/smarttomato/husky_learn_hold.py --id 1 --no-switch
+# ⚠️ 故意不用 Restart=always：
+#    本板上 pinpong 进程重启 = 重新配置 gd32v，连续重启极易把板子带进
+#    「起来就 panic、panic 又重启」的循环。挂了就整机重启，别自动重试。
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=append:/root/smarttomato/learn.log
+StandardError=append:/root/smarttomato/learn.log
+
+[Install]
+WantedBy=multi-user.target

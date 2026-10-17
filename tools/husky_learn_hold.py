@@ -1,160 +1,163 @@
 # -*- coding: utf-8 -*-
-"""按键式学习 —— 用 M10 的 A/B 键控制二哈「物体分类」的学习。
+"""二哈「物体分类」学手机 —— 常驻脚本（官方库写法 + M10 屏幕状态显示）。
 
-背景：二哈模块上的按键在模块**本地**，I2C 协议读不到它的状态
-      （协议里没有「读按键」指令；0x2C 那个 KNOCK 是心跳，不是按键，库里还被注释掉了）。
-      所以拿 M10 自己的 A/B 键当开关 —— 设备 `/dev/input/event2`（名字 `keyboard_ab`）。
+官方接口（pinpong.libs.dfrobot_huskylens）：
 
-按键 code（2026-10-17 从设备位图 `KEY=1000050000000` 推出，bit 28/30/48）：
-    A 键 = 30（KEY_A）   B 键 = 48（KEY_B）   Home = 28（KEY_ENTER）
-    不确定就先跑 `--probe` 现场确认。
+    Board().begin()
+    hl = Huskylens(i2c_addr=0x32, bus_num=0)
 
-用法（在板子上单独跑，**跑前先 kill 主程序**，跑完 reboot 再拉起来）：
+    hl.command_request_algorthim("ALGORITHM_OBJECT_CLASSIFICATION")  # 切算法，等约 5 秒
+    hl.command_request_learn_once(1)                # 把镜头前这一刻学成 ID 1
+    hl.command_request_blocks()                     # 请求识别结果
+    hl.read_count("blocks")                         # 画面里检测到几个目标
+    hl.read_learned_id_count()                      # 模块上已学几个 ID
+    hl.command_request_save_model_to_SD_card(0)     # 存模型到 SD 卡槽 0
+    hl.command_request_load_model_from_SD_card(0)   # 从 SD 卡槽 0 载入
+    hl.command_request_forget()                     # 清空已学内容
 
-    # 手动模式（默认）：按 A 开始，每按 B 学一张，再按 A 停止
-    python3 -u husky_learn_hold.py --id 1
+二哈模块上的学习键在模块本地，I2C 读不到，所以用 M10 板载 A/B 键：
+    /dev/input/event2（keyboard_ab），A = 30（KEY_A），B = 48（KEY_B）
 
-    # 按住模式：按一下开始（立刻学第一张，之后每秒一张），再按一下停
-    python3 -u husky_learn_hold.py --id 1 --mode hold --interval 1.0
+M10 屏幕（240×320，unihiker.GUI + Pillow）实时显示，方便判断学得对不对：
 
-    # 其它
-    python3 -u husky_learn_hold.py --probe                 # 探按键 code
-    python3 -u husky_learn_hold.py --id 1 --key-a 30 --key-b 48
-    python3 -u husky_learn_hold.py --id 1 --auto-save 0    # 退出时自动存槽 0
+    学手机 · ID 1
+        学习中              ← 学习中青色 / 待命灰色，顶部有青色进度条
+          12                ← 本次已学张数（大字）
+        本次已学（张）
+    ● 看到目标              ← 二哈检测到目标时亮绿，没检测到是灰色空心圆
+    模块已学 ID：1
+    A 开始/结束   B 学一张
 
-⚠️ 手动模式下**每张都是你摆好姿势再按 B**，所以换 App / 换角度 / 换光线
-   都能精确控制。官方建议每个类别 30 张以上。细节见 docs/m10_learn_phone.md。
+用法（板上 /root/smarttomato 下）：
+    python3 -u husky_learn_hold.py              # 常驻：按 A 启停，按 B 学一张
+    python3 -u husky_learn_hold.py --check 10   # 连读 10 秒看识别结果
+    python3 -u husky_learn_hold.py --save 0     # 存模型到 SD 卡槽 0
+    python3 -u husky_learn_hold.py --load 0     # 从 SD 卡槽 0 载入
+    python3 -u husky_learn_hold.py --forget     # 清空已学内容
+    python3 -u husky_learn_hold.py --no-switch  # 模块已在物体分类时跳过切算法
+    python3 -u husky_learn_hold.py --no-screen  # 不接管屏幕，只打日志
+
+⚠️ 退出请用 Ctrl+C 或 systemctl stop：脚本走 os._exit()，避免 pinpong 退出时
+   复位 gd32v 触发内核 panic（2026-10-17 实测）。
 """
 import argparse
 import os
 import select
+import signal
 import struct
 import sys
 import time
 
-HL_ADDR = 0x32
-HL_REQ_BLOCKS = [0x55, 0xAA, 0x11, 0x00, 0x21, 0x31]
-HL_READ_LEN = 64           # 一次读 64 字节 = RETURN_INFO(16B) + 最多 3 个 RETURN_BLOCK；
-                           # 物体分类永远只有 1 个结果（共 32 字节），够用
-ALGO = "ALGORITHM_OBJECT_CLASSIFICATION"
-ALGO_WAIT = 5.5
+from pinpong.board import Board
+from pinpong.libs.dfrobot_huskylens import Huskylens
 
-# M10 板载 A/B 键
-EVENT_DEV = "/dev/input/event2"     # 设备名 keyboard_ab
-EV_KEY = 1
-KEY_A = 30                          # KEY_A
-KEY_B = 48                          # KEY_B
-EVENT_FORMAT = "llHHi"              # timeval(16) + type(2) + code(2) + value(4) = 24 字节
+EVENT_DEV = "/dev/input/event2"
+EV_KEY, KEY_A, KEY_B = 1, 30, 48
+EVENT_FORMAT = "llHHi"
 EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
 
+ALGO = "ALGORITHM_OBJECT_CLASSIFICATION"
+ALGO_WAIT = 5
+READ_SEC = 1.0                  # 每秒读一次识别结果（刷新屏幕用）
 
-def u16(buf, i):
-    return buf[i] | (buf[i + 1] << 8)
+# 屏幕
+SCR_W, SCR_H = 240, 320
+C_BG, C_INK, C_SUB = "#FFFFFF", "#1F2933", "#5B6B73"
+C_TEAL, C_GREEN, C_GREY = "#00838F", "#2E7D32", "#B0BEC5"
 
-
-def parse_response(raw):
-    """拆「请求 blocks」的响应流 → (框数, 已学ID数, [(id, cx, cy, w, h), ...])。
-
-    ⚠️ 关键（2026-10-17 实测）：响应是**两个包** ——
-      1) 0x29 RETURN_INFO：data[0..1]=框数、[2..3]=已学ID数、[4..5]=帧号、[6..9]=固定 0
-      2) 每个框一个 0x2A RETURN_BLOCK：xCenter yCenter width height ID（各 2 字节小端）
-    「物体分类不输出坐标」容易让人以为 ID 在 RETURN_INFO 里 —— **错了**，
-    ID 在 RETURN_BLOCK 里（坐标恒为整屏 320×320 无意义，但 ID 是真的）。
-    **只读 16 字节永远看不到 ID**，必须连后面的 RETURN_BLOCK 一起读。
-    """
-    if not raw or len(raw) < 16 or raw[0] != 0x55 or raw[1] != 0xAA:
-        return None, None, []
-    data = raw[5:5 + raw[3]]
-    if len(data) < 6:
-        return None, None, []
-    n_box, n_learned = u16(data, 0), u16(data, 2)
-    blocks, pos = [], 16          # 跳过 RETURN_INFO 固定 16 字节
-    while pos + 5 <= len(raw) and len(blocks) < n_box:
-        if raw[pos] != 0x55 or raw[pos + 1] != 0xAA:
-            break
-        dlen = raw[pos + 3]
-        end = pos + 5 + dlen + 1
-        if end > len(raw):
-            break
-        if raw[pos + 4] == 0x2A and dlen >= 10:
-            d = raw[pos + 5:pos + 5 + dlen]
-            blocks.append((u16(d, 8), u16(d, 0), u16(d, 2),
-                           u16(d, 4), u16(d, 6)))
-        pos = end
-    return n_box, n_learned, blocks
+FONT_CN = [
+    "/usr/share/fonts/truetype/HYQH/HYQiHei_50S.ttf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+]
 
 
-def fmt(blocks):
-    if not blocks:
-        return "（无检测框）"
-    return " / ".join("ID=%d 框(%d,%d %dx%d)" % b for b in blocks)
+def hard_exit(code=0):
+    """退出走 os._exit：跳过解释器清理，避免 pinpong 复位 gd32v 导致内核 panic。"""
+    sys.stdout.flush()
+    os._exit(code)
 
 
-class Husky(object):
-    """薄封装：发命令走官方库，读 blocks 走自己的快速读法。"""
+class Panel(object):
+    """M10 屏幕状态面板：只在内容变化时重画，不空转刷屏。"""
 
     def __init__(self):
-        # ⚠️ 必须先 Board().begin() 初始化板子：pinpong 的 gboard 默认是 None，
-        #    不初始化的话 I2C() 构造里 `self.board.i2c[bus_num]` 直接抛
-        #    `'NoneType' object has no attribute 'i2c'`（主程序也是这么初始化的）。
-        from pinpong.board import Board
-        Board().begin()
-        from pinpong.libs.dfrobot_huskylens import Huskylens
-        self.lib = Huskylens(i2c_addr=HL_ADDR, bus_num=0)
-        self.i2c = self.lib.i2c
-
-    def switch(self):
+        from PIL import Image, ImageDraw, ImageFont
+        self._Font = ImageFont
+        here = os.path.dirname(os.path.abspath(__file__))
+        self._path = next((p for p in ([here + "/HYQiHei_50S.ttf"] + FONT_CN)
+                           if os.path.exists(p)), None)
+        self._cache = {}
+        self.pil = Image.new("RGB", (SCR_W, SCR_H), C_BG)
+        self.d = ImageDraw.Draw(self.pil)
+        self.item = None
+        self._last = None
         try:
-            self.lib.command_request_algorthim(ALGO)
+            from unihiker import GUI
+            self.item = GUI().draw_image(x=0, y=0, image=self.pil)
+            print("[屏幕] 已接管 240×320 显示")
         except Exception as e:
-            print("  切算法失败（%s）—— 不退出，继续尝试读数" % e)
-            return False
+            print("[屏幕] 初始化失败（%s），只在日志里输出" % e)
+
+    def _font(self, size):
+        if size not in self._cache:
+            self._cache[size] = (self._Font.truetype(self._path, size)
+                                 if self._path else self._Font.load_default())
+        return self._cache[size]
+
+    def _text(self, cx, cy, s, size, fill):
+        f = self._font(size)
+        x0, y0, x1, y1 = self.d.textbbox((0, 0), s, font=f)
+        self.d.text((cx - (x1 - x0) / 2.0 - x0, cy - (y1 - y0) / 2.0 - y0),
+                    s, font=f, fill=fill)
+
+    def show(self, cid, learning, count, boxes, learned):
+        key = (cid, learning, count, boxes > 0, learned)
+        if key == self._last:
+            return
+        self._last = key
+        d = self.d
+        d.rectangle([0, 0, SCR_W - 1, SCR_H - 1], fill=C_BG)
+        if learning:                                  # 顶部青色条 = 正在学
+            d.rectangle([0, 0, SCR_W - 1, 6], fill=C_TEAL)
+
+        self._text(SCR_W / 2.0, 26, "学手机 · ID %d" % cid, 16, C_SUB)
+        self._text(SCR_W / 2.0, 80, "学习中" if learning else "待命", 34,
+                   C_TEAL if learning else C_GREY)
+        self._text(SCR_W / 2.0, 150, "%d" % count, 72, C_INK)
+        self._text(SCR_W / 2.0, 202, "本次已学（张）", 14, C_SUB)
+
+        if boxes > 0:
+            self._text(SCR_W / 2.0, 240, "● 看到目标", 18, C_GREEN)
+        else:
+            self._text(SCR_W / 2.0, 240, "○ 没看到目标", 18, C_GREY)
+
+        self._text(SCR_W / 2.0, 270, "模块上报已学：%d" % learned, 14, C_SUB)
+        self._text(SCR_W / 2.0, 300, "A 开始/结束    B 学一张", 12, C_SUB)
+
+        if self.item is not None:
+            try:
+                self.item.config(image=self.pil)
+            except Exception:
+                pass
+
+
+def open_husky(switch=True):
+    Board().begin()
+    hl = Huskylens(i2c_addr=0x32, bus_num=0)
+    if switch:
+        print("切到「物体分类」，等 %d 秒…" % ALGO_WAIT)
+        hl.command_request_algorthim(ALGO)
         time.sleep(ALGO_WAIT)
-        self.read_blocks()      # 清一次缓冲，避免读到上一个算法留下的残留响应
-        return True
-
-    def _read_blocks_once(self):
-        """读一次识别结果；包不合法时返回 (None, None, [])（模块可能在忙/训练中）。
-
-        ⚠️ I2C 操作必须包 try：总线偶发失败时 pinpong 直接抛异常，不接住的话
-        进程会带着半截 I2C 事务死掉 → 退出时 gd32v 复位 → **内核 panic**
-        （2026-10-17 实测：没加这层保护时 daemon 版两次把板子搞崩）。
-        """
-        try:
-            self.i2c.writeto(HL_ADDR, HL_REQ_BLOCKS)
-            time.sleep(0.05)      # 给模块准备响应的时间，立即读偶尔会拿到上一次的残留
-            raw = self.i2c.readfrom_mem(HL_ADDR, 0, HL_READ_LEN)
-        except Exception:
-            return None, None, []
-        return parse_response(raw)
-
-    def read_blocks(self, retries=4, delay=0.4):
-        """读识别结果；包不合法时重试几次，仍失败就重发切算法指令自救。
-
-        ⚠️ 实测（2026-10-17）：连续 learn 之后模块可能卡在不回响应的状态
-        （read 持续返回 None），重发 command_request_algorthim + 等 5.5s 即恢复。
-        """
-        for _ in range(max(1, retries)):
-            n, nlearned, blocks = self._read_blocks_once()
-            if n is not None:
-                return n, nlearned, blocks
-            time.sleep(delay)
-        print("  （连续 %d 次读包失败，重发切算法指令自救…）" % retries)
-        try:
-            self.lib.command_request_algorthim(ALGO)
-        except Exception as e:
-            print("  （自救的切算法也失败了：%s）" % e)
-            return None, None, []
-        time.sleep(ALGO_WAIT)
-        return self._read_blocks_once()
+    return hl
 
 
-def _open_keys():
-    return os.open(EVENT_DEV, os.O_RDONLY)
+def read(hl):
+    """读一次识别结果 → (检测框数, 已学 ID 数)。read_count 内部已发请求。"""
+    return hl.read_count("blocks"), hl.read_learned_id_count()
 
 
-def _poll_key(fd):
-    """读一次按键事件；是「按下」就返回 code，否则返回 None。非阻塞。"""
+def poll_key(fd):
+    """非阻塞读一个按键事件，是「按下」就返回 code。"""
     r, _, _ = select.select([fd], [], [], 0.05)
     if not r:
         return None
@@ -162,175 +165,97 @@ def _poll_key(fd):
     if len(data) < EVENT_SIZE:
         return None
     _, _, type_, code, value = struct.unpack(EVENT_FORMAT, data)
-    if type_ == EV_KEY and value == 1:
-        return code
-    return None
-
-
-def cmd_probe(sec):
-    """只读按键、不碰 I2C —— 用来确认 A/B 键的 code。"""
-    fd = _open_keys()
-    print("探测 %.0f 秒：请按 A / B / Home 键，看下面打印的 code" % sec)
-    print("（Ctrl+C 提前结束）\n")
-    t_end = time.time() + sec
-    try:
-        while time.time() < t_end:
-            code = _poll_key(fd)
-            if code is not None:
-                print("  按下 code=%d" % code)
-    finally:
-        os.close(fd)
-
-
-def _finish(h, n, cid, auto_save):
-    print("本次共学 %d 张到 ID %d" % (n, cid))
-    if auto_save is not None:
-        print("自动存到 SD 卡槽 %d …（卡必须 FAT32）" % auto_save)
-        h.lib.command_request_save_model_to_SD_card(auto_save)
-        time.sleep(3.0)
-        print("已发送保存指令（无回执，拔卡插电脑确认）")
-    _, nlearned, _ = h.read_blocks()
-    print("当前模块上已学 ID 数：%s" % nlearned)
-
-
-def cmd_manual(h, cid, key_a, key_b, auto_save):
-    """按 A 开始/停止，每按 B 学一张。"""
-    fd = _open_keys()
-    print("切到「物体分类」…（等 %.1f 秒）" % ALGO_WAIT)
-    h.switch()
-
-    print("\n手动模式（A=开始/停止，B=学一张）：")
-    print("  按 A 键 → 开始学习 ID %d" % cid)
-    print("  按 B 键 → 学一张（先摆好姿势：换 App / 换角度 / 换光线）")
-    print("  再按 A 键 → 停止\n")
-
-    active = False
-    n = 0
-    try:
-        while True:
-            code = _poll_key(fd)
-            if code is None:
-                continue
-            if code == key_a:
-                active = not active
-                if active:
-                    print("\n▶ 学习模式已开启 —— 现在每按一次 B 键学一张")
-                else:
-                    print("\n■ 学习模式已关闭")
-                    break
-            elif code == key_b:
-                if not active:
-                    print("  （学习模式未开启，先按 A 键）")
-                    continue
-                try:
-                    h.lib.command_request_learn_once(cid)
-                except Exception as e:
-                    print("  学习失败（%s）—— 总线可能抽了，下张再试" % e)
-                    continue
-                time.sleep(0.4)      # 给模块消化/训练的时间，否则快速连按会背积
-                n += 1
-                print("  [%d] 已学 → ID %d" % (n, cid))
-            else:
-                print("  （未识别的键 code=%d；--probe 查看，--key-a/--key-b 指定）" % code)
-    except KeyboardInterrupt:
-        print("\n（Ctrl+C）")
-    finally:
-        os.close(fd)
-    _finish(h, n, cid, auto_save)
-
-
-def cmd_hold(h, cid, interval, key, auto_save):
-    """按一下开始（立刻学第一张，之后每 interval 秒一张），再按一下停。"""
-    fd = _open_keys()
-    print("切到「物体分类」…（等 %.1f 秒）" % ALGO_WAIT)
-    h.switch()
-
-    print("\n按住模式（任意键启停）：按一次键 = 开始，再按一次 = 停止")
-    print("⚠️ 开始后每 %.1f 秒自动学一张，请**不断晃动手机 / 换角度 / 换 App**\n" % interval)
-
-    learning = False
-    n = 0
-    next_learn = 0.0
-    try:
-        while True:
-            code = _poll_key(fd)
-            if code is not None and (key is None or code == key):
-                learning = not learning
-                print("\n%s（键 code=%d，累计已学 %d 张）"
-                      % ("▶ 开始学习" if learning else "■ 停止", code, n))
-                if learning:
-                    next_learn = time.time()      # 立刻学第一张
-                else:
-                    break
-            if learning and time.time() >= next_learn:
-                try:
-                    h.lib.command_request_learn_once(cid)
-                except Exception as e:
-                    print("  学习失败（%s）—— 总线可能抽了，下一张再试" % e)
-                    next_learn = time.time() + interval
-                    continue
-                n += 1
-                print("  [%d] 已学 → ID %d" % (n, cid))
-                time.sleep(0.4)      # 给模块消化/训练的时间，否则指令会背积
-                next_learn = time.time() + interval
-    except KeyboardInterrupt:
-        print("\n（Ctrl+C）")
-    finally:
-        os.close(fd)
-    _finish(h, n, cid, auto_save)
+    return code if (type_ == EV_KEY and value == 1) else None
 
 
 def main():
-    ap = argparse.ArgumentParser(description="用 M10 的 A/B 键控制二哈物体分类学习")
-    ap.add_argument("--probe", type=float, nargs="?", const=8.0, metavar="秒",
-                    help="只探测按键 code，不碰 I2C（默认 8 秒）")
-    ap.add_argument("--id", type=int, metavar="ID", help="要学的类别 ID")
-    ap.add_argument("--mode", choices=["manual", "hold"], default="manual",
-                    help="manual=按A启停+按B学一张（默认）；hold=按一下连续学、再按一下停")
-    ap.add_argument("--interval", type=float, default=1.0, metavar="秒",
-                    help="hold 模式下每张之间的间隔（默认 1.0 秒）")
-    ap.add_argument("--key", type=int, metavar="code",
-                    help="hold 模式下限定某一个键（默认任意键触发）")
-    ap.add_argument("--key-a", type=int, default=KEY_A, metavar="code",
-                    help="A 键 code（默认 %d）" % KEY_A)
-    ap.add_argument("--key-b", type=int, default=KEY_B, metavar="code",
-                    help="B 键 code（默认 %d）" % KEY_B)
-    ap.add_argument("--auto-save", type=int, metavar="槽",
-                    help="退出时自动把模型存到 SD 卡槽位")
+    ap = argparse.ArgumentParser(description="二哈物体分类学手机（常驻）")
+    ap.add_argument("--id", type=int, default=1, help="要学的类别 ID（默认 1）")
+    ap.add_argument("--check", type=float, metavar="秒", help="连读若干秒看识别结果")
+    ap.add_argument("--save", type=int, metavar="槽", help="模型存到 SD 卡槽（0~4）")
+    ap.add_argument("--load", type=int, metavar="槽", help="从 SD 卡槽载入模型")
+    ap.add_argument("--forget", action="store_true", help="清空已学内容")
+    ap.add_argument("--no-switch", action="store_true", help="不切算法")
+    ap.add_argument("--no-screen", action="store_true", help="不接管屏幕")
     args = ap.parse_args()
 
-    if args.probe is not None:
-        cmd_probe(args.probe)
-        return 0
-    if args.id is None:
-        ap.print_help()
-        return 2
+    hl = open_husky(switch=not args.no_switch)
 
-    try:
-        h = Husky()
-    except Exception as e:
-        print("二哈初始化失败：%s" % e)
-        print("→ 先确认：主程序是不是还占着 I2C？二哈的 TF 卡插着没有（非 FAT32 会让 0x32 消失）？")
-        return 1
+    if args.save is not None:
+        hl.command_request_save_model_to_SD_card(args.save)
+        time.sleep(3)
+        print("已发送保存指令到槽 %d（无回执，拔卡插电脑确认）" % args.save)
+        hard_exit(0)
 
-    if args.mode == "manual":
-        try:
-            cmd_manual(h, args.id, args.key_a, args.key_b, args.auto_save)
-        except Exception:
-            # ⚠️ 兜底：任何意外都不能让进程「带着半截 I2C 事务」死掉 ——
-            #    那种死法会在退出复位 gd32v 时引发内核 panic（2026-10-17 实测）。
-            import traceback
-            traceback.print_exc()
-            return 1
-    else:
-        try:
-            cmd_hold(h, args.id, args.interval, args.key, args.auto_save)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            return 1
-    return 0
+    if args.load is not None:
+        hl.command_request_load_model_from_SD_card(args.load)
+        time.sleep(3)
+        print("已从槽 %d 载入（无回执，用 --check 验证）" % args.load)
+        hard_exit(0)
+
+    if args.forget:
+        hl.command_request_forget()
+        time.sleep(1)
+        print("已清空；当前已学 ID 数：%d" % hl.read_learned_id_count())
+        hard_exit(0)
+
+    panel = None if args.no_screen else Panel()
+
+    if args.check:
+        print("连读 %.0f 秒（Ctrl+C 结束）" % args.check)
+        t_end = time.time() + args.check
+        while time.time() < t_end:
+            n, learned = read(hl)
+            print("  框数=%d  已学ID=%d" % (n, learned))
+            if panel:
+                panel.show(args.id, False, 0, n, learned)
+            time.sleep(1)
+        hard_exit(0)
+
+    # ---- 常驻：按 A 启停，按 B 学一张 ----
+    fd = os.open(EVENT_DEV, os.O_RDONLY)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: hard_exit(0))
+
+    print("常驻就绪：按 A 开始 / 结束，按 B 学一张到 ID %d" % args.id)
+    learning = False
+    count = 0
+    boxes, learned = 0, 0
+    t_read = 0.0
+    last_state = None
+    while True:
+        code = poll_key(fd)
+        if code == KEY_A:
+            learning = not learning
+            print("▶ 学习模式开启" if learning else "■ 学习模式关闭，本次 %d 张" % count)
+        elif code == KEY_B:
+            if not learning:
+                print("  先按 A 键开启学习模式")
+            else:
+                hl.command_request_learn_once(args.id)
+                time.sleep(0.4)      # 给模块消化的时间，避免连按积压
+                count += 1
+                print("  [%d] 已学 → ID %d" % (count, args.id))
+
+        now = time.time()
+        if now - t_read >= READ_SEC:
+            t_read = now
+            boxes, learned_now = read(hl)
+            # 模块在后台重训时「已学 ID 数」会瞬间回 0，显示上取本次会话的最大值，
+            # 免得屏幕在 1 / 0 之间跳（只有 --forget 才会真的清掉，那是另一个进程）。
+            learned = max(learned, learned_now)
+            if (learning, boxes > 0) != last_state:
+                last_state = (learning, boxes > 0)
+                print("· %s｜框数=%d｜已学ID=%d｜本次 %d 张"
+                      % ("学习中" if learning else "待命", boxes, learned, count))
+
+        if panel:
+            panel.show(args.id, learning, count, boxes, learned)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        main()
+    except Exception as e:
+        print("出错：%s" % e)
+        hard_exit(1)

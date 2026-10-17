@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
-"""学习控制台 —— 本机网页面板，远程管理 M10 上常驻的二哈学习脚本。
+"""学习控制台 —— 本机网页面板，远程管理 M10 上的二哈学习服务。
 
-背景：学习脚本（husky_learn_hold.py）用 nohup 常驻在板子上，靠 M10 板载
-A/B 键操作。本面板负责「脚本之外的杂事」：看状态、拉起脚本、reboot 清场、
-查询/清空已学模型 —— 全都不用记 SSH 命令。
+学习脚本 `husky_learn_hold.py` 现在以 systemd 服务 **husky-learn** 常驻，
+操作全在板子上（A/B 键 + 屏幕）。本面板负责「脚本之外的杂事」：
+看状态、启停服务、查询/清空已学模型 —— 不用记 SSH 命令。
 
-⚠️ 硬约束（2026-10-17 实测，见 memory）：
-   1. pinpong 进程「一退出就 panic」——正常退出也崩。所以：
-      - 学完**不要**按 A 停止，直接点「重启板子」清场；
-      - 「查询已学 / 清空」这类一次性脚本跑完必崩板子 → 属预期，约 1 分钟恢复。
-   2. 常驻启动只能用 nohup 方式（board_ssh.py daemon 的 setsid launcher 有 SIGHUP
-      竞态，learn.log 会一片空白）。
-   3. 查询/清空执行前，板子上**不能有** husky_learn_hold.py 在跑（I2C 单进程）。
+⚠️ 硬约束：
+   1. I2C 单进程：查询/清空执行前，学习服务必须停止。
+   2. 常驻用 systemd（`systemctl start/stop husky-learn`）；没有 unit 时退回 nohup。
+   3. 进程退出走 os._exit（脚本内置），否则 pinpong 复位 gd32v 会触发内核 panic。
 
 用法：
     双击「启动学习控制台.bat」，或在 tools/ 下跑：
-    C:/Users/student/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe learn_panel.py
+    C:/Users/22629/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe learn_panel.py
     然后浏览器打开 http://127.0.0.1:8790
 """
 import json
@@ -115,28 +112,46 @@ def get_status():
 # ---------------------------------------------------------------- 操作
 
 def action_start():
-    """nohup 拉起学习脚本（唯一验证过可靠的常驻方式）。"""
-    out, _, _ = ssh_run(
-        "ps aux | grep husky_learn_hold | grep -v grep | wc -l", timeout=20)
-    if out.strip() != "0":
+    """拉起学习脚本：优先 systemd 服务（husky-learn），没有再退回 nohup。"""
+    if _proc_running():
         return {"ok": False, "msg": "学习脚本已在运行，无需重复启动。"}
-    ssh_run(
-        "cd {wd} && nohup python3 -u husky_learn_hold.py --id 1 "
-        "> learn.log 2>&1 < /dev/null & echo LAUNCHED".format(wd=WORKDIR),
-        timeout=25)
-    time.sleep(2)
-    out, _, _ = ssh_run("ps aux | grep husky_learn_hold | grep -v grep", timeout=20)
-    pid = ""
-    m = re.search(r"root\s+(\d+)", out)
-    if m:
-        pid = "（PID %s）" % m.group(1)
-    return {"ok": True, "msg": "学习脚本已启动%s，日志 learn.log。\n"
+    if _unit_exists():
+        ssh_run("systemctl start husky-learn", timeout=60)
+    else:
+        ssh_run(
+            "cd {wd} && nohup python3 -u husky_learn_hold.py --id 1 --no-switch "
+            "> learn.log 2>&1 < /dev/null & echo LAUNCHED".format(wd=WORKDIR),
+            timeout=25)
+    time.sleep(4)
+    if not _proc_running():
+        return {"ok": False, "msg": "启动后没看到进程 —— 看日志 learn.log，"
+                "板子可能刚 panic 重启（见 docs/m10_learn_phone.md §7.5）。"}
+    return {"ok": True, "msg": "学习脚本已启动。\n"
             "现在走到板子前：按 A 开始 → 按 B 学一张（重复 30+ 张）。\n"
-            "⚠️ 学完别按 A 停止，直接回本面板点「重启板子」清场。" % pid}
+            "屏幕上会显示「本次已学（张）」和「● 看到目标」。"}
+
+
+def action_stop():
+    """停服务：SIGTERM → 脚本 os._exit，不用重启板子。"""
+    if _unit_exists():
+        ssh_run("systemctl stop husky-learn", timeout=40)
+    else:
+        ssh_run("pkill -f 'husky_learn_hold.py --id'", timeout=20)
+    time.sleep(2)
+    if _proc_running():
+        return {"ok": False, "msg": "没停掉 —— 进程还在。可改用「重启板子」。"}
+    return {"ok": True, "msg": "已停止。屏幕会停在最后一帧，"
+            "再学习点「启动学习脚本」即可。"}
+
+
+def _unit_exists():
+    out, _, _ = ssh_run(
+        "test -s /etc/systemd/system/husky-learn.service && echo YES", timeout=15)
+    return "YES" in out
 
 
 def action_reboot():
-    """reboot 清场（停脚本的唯一干净方式）。"""
+    """reboot 清场。"""
     ssh_run("(sleep 2; reboot) >/dev/null 2>&1 & echo REBOOTING", timeout=15)
     return {"ok": True, "msg": "板子将在 2 秒后重启，约 1 分钟恢复。\n"
             "重启后常驻脚本不再运行，需要再学习就点「启动学习脚本」。"}
@@ -149,42 +164,32 @@ def _proc_running():
 
 
 def action_check():
-    """查询当前已学 ID 数与识别效果（--check 8）。
-
-    ⚠️ 跑完进程退出 → 板子必 panic 重启（pinpong 已知 bug），属预期。
-    """
+    """查询当前已学 ID 数与识别效果（--check 8，自定义协议快读）。"""
     if _proc_running():
         return {"ok": False, "msg": "学习脚本还在跑（I2C 单进程约束）。\n"
-                "请先点「重启板子」清场，等约 1 分钟恢复后再查。"}
+                "请先点「停止学习」或「重启板子」清场，再查。"}
     out, _, _ = ssh_run(
-        "cd {wd} && timeout 30 python3 -u husky_learn_phone.py --check 8 2>&1".format(
-            wd=WORKDIR), timeout=45)
-    learned = None
-    m = re.findall(r"已学=(\d+)", out)
-    if m:
-        learned = m[-1]
+        "cd {wd} && timeout 30 python3 -u husky_learn_phone.py --check 8 --no-switch 2>&1"
+        .format(wd=WORKDIR), timeout=45)
     tail = "\n".join(out.strip().splitlines()[-8:])
-    msg = tail + "\n\n⚠️ 查询进程已退出 —— 按已知 bug，板子会在几十秒内自动重启（约 1 分钟恢复），属预期。"
-    if learned is not None:
-        msg = "当前已学 ID 数：%s\n\n" % learned + msg
-    return {"ok": True, "msg": msg}
+    return {"ok": True, "msg": tail}
 
 
 def action_forget():
-    """清空模块上全部已学内容。⚠️ 同样跑完必崩板子，属预期。"""
+    """清空模块上全部已学内容。"""
     if _proc_running():
         return {"ok": False, "msg": "学习脚本还在跑（I2C 单进程约束）。\n"
-                "请先点「重启板子」清场，等约 1 分钟恢复后再清空。"}
+                "请先点「停止学习」或「重启板子」清场，再清空。"}
     out, _, _ = ssh_run(
-        "cd {wd} && timeout 30 python3 -u husky_learn_phone.py --forget 2>&1".format(
-            wd=WORKDIR), timeout=45)
+        "cd {wd} && timeout 30 python3 -u husky_learn_phone.py --forget --no-switch 2>&1"
+        .format(wd=WORKDIR), timeout=45)
     tail = "\n".join(out.strip().splitlines()[-6:])
-    msg = tail + "\n\n⚠️ 清空进程已退出 —— 板子会在几十秒内自动重启（约 1 分钟恢复），属预期。"
-    return {"ok": True, "msg": msg}
+    return {"ok": True, "msg": tail}
 
 
 ACTIONS = {
     "start": action_start,
+    "stop": action_stop,
     "reboot": action_reboot,
     "check": action_check,
     "forget": action_forget,
@@ -276,18 +281,19 @@ PAGE = r"""<!DOCTYPE html>
   <div class="btns">
     <button class="b-ghost" id="btnRefresh">刷新状态</button>
     <button class="b-main" id="btnStart">启动学习脚本</button>
-    <button class="b-danger" id="btnReboot">重启板子（清场）</button>
+    <button class="b-ghost" id="btnStop">停止学习</button>
+    <button class="b-danger" id="btnReboot">重启板子</button>
   </div>
 
   <div class="sect">
     <h2>使用步骤</h2>
     <ol class="steps">
       <li>确认上面「学习脚本」显示 <b>运行中</b>（没运行就点「启动学习脚本」）。</li>
-      <li>走到板子前，<b>按 A 键</b> 开始学习模式（学的 ID 是 1）。</li>
-      <li>把手机摆好（换 App / 换角度 / 换光线），<b>按 B 键</b> 学一张；再换姿势按 B…… 建议 <b>30 张以上</b>，亮屏灭屏都要学。</li>
-      <li>学完回到本面板，<b>点「重启板子」</b> 清场。</li>
+      <li>走到板子前，<b>按 A 键</b> 开始学习模式（学的 ID 是 1），板子屏幕会变「学习中」。</li>
+      <li>把手机摆好（换 App / 换角度 / 换光线），屏幕显示 <b>● 看到目标</b> 时<b>按 B 键</b> 学一张；再换姿势按 B…… 建议 <b>30 张以上</b>，亮屏灭屏都要学。</li>
+      <li>学完按 A 结束（或直接点「停止学习」），屏幕上的「本次已学（张）」就是这一轮的数量。</li>
     </ol>
-    <div class="warnbox">⚠️ 学完<b>不要</b>在板子上按 A 停止 —— pinpong 进程一退出就会让板子内核 panic 重启（已知 bug，实测）。用「重启板子」按钮清场最干净。</div>
+    <div class="warnbox">⚠️ 二哈的模型断电即丢，学够了记得存 SD 卡：板上跑 <code>python3 -u husky_learn_phone.py --save 0 --no-switch</code>（卡必须是 FAT32）。</div>
   </div>
 
   <div class="sect">
@@ -297,9 +303,9 @@ PAGE = r"""<!DOCTYPE html>
 
   <div class="sect">
     <details>
-      <summary>高级操作（会重启板子，属预期）</summary>
+      <summary>高级操作</summary>
       <div style="font-size:13px;color:var(--sub);margin-top:6px">
-        「查询 / 清空」是一次性脚本，跑完退出必触发 panic 重启（已知 bug）——约 1 分钟自动恢复，别慌。执行前板子上不能有学习脚本在跑。
+        一次性脚本（自定义协议快读）。执行前板子上不能有学习脚本在跑 —— 先点「停止学习」。
       </div>
       <div class="adv">
         <button class="b-ghost" id="btnCheck">查询已学 ID 与识别效果</button>
@@ -396,16 +402,19 @@ $("ovNo").onclick = function(){ $("ov").classList.remove("show"); };
 
 $("btnRefresh").onclick = refresh;
 $("btnStart").onclick = function(){
-  confirm("启动学习脚本？", "将以 nohup 方式在板子上常驻运行 husky_learn_hold.py --id 1（日志 learn.log）。\n若已在运行则不会重复启动。", "start", this);
+  confirm("启动学习脚本？", "将以 systemd 服务 husky-learn 启动（日志 learn.log）。\n若已在运行则不会重复启动。", "start", this);
+};
+$("btnStop").onclick = function(){
+  confirm("停止学习？", "停服务（SIGTERM → 脚本 os._exit，不会让板子 panic）。\n板子屏幕会停在最后一帧。", "stop", this);
 };
 $("btnReboot").onclick = function(){
-  confirm("重启板子？", "板子将在 2 秒后重启（约 1 分钟恢复）。\n这是停掉学习脚本的唯一干净方式 —— 进程直接退出会触发内核 panic。\n重启后常驻脚本不再运行，需要再学习就重新点「启动学习脚本」。", "reboot", this);
+  confirm("重启板子？", "板子将在 2 秒后重启（约 1 分钟恢复）。\n只有板子起不来（见 docs/m10_learn_phone.md §7.5）时才需要；正常停止用「停止学习」。", "reboot", this);
 };
 $("btnCheck").onclick = function(){
-  confirm("查询已学 ID？", "会跑一次性 --check 脚本（约 15 秒）。\n⚠️ 跑完进程退出，板子会在几十秒内自动 panic 重启（已知 bug），约 1 分钟恢复，属预期。\n若学习脚本还在跑请先取消，去点「重启板子」。", "check", this);
+  confirm("查询已学 ID？", "会跑一次性 --check 脚本（约 8 秒，自定义协议快读）。\n执行前学习脚本必须是停止状态。", "check", this);
 };
 $("btnForget").onclick = function(){
-  confirm("清空全部已学内容？", "会跑一次性 --forget 脚本，清掉模块上所有已学 ID（当前疑似有 6 个）。\n⚠️ 跑完进程退出，板子会在几十秒内自动 panic 重启，约 1 分钟恢复，属预期。", "forget", this);
+  confirm("清空全部已学内容？", "会跑一次性 --forget 脚本，清掉模块上所有已学 ID。\n执行前学习脚本必须是停止状态。", "forget", this);
 };
 
 $("auto").onchange = function(){
