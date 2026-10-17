@@ -8,6 +8,7 @@ paramiko 能直接带密码连，是本机唯一可用的非交互 SSH 路径。
     python board_ssh.py exec "ls /root/smarttomato"
     python board_ssh.py put  <本地文件> <板上路径>
     python board_ssh.py get  <板上路径> <本地文件>
+    python board_ssh.py daemon "<命令>" [日志名，默认 step3.log]
 """
 import sys
 import paramiko
@@ -40,7 +41,7 @@ def do_exec(cmd):
         c.close()
 
 
-def do_daemon(cmd):
+def do_daemon(cmd, log="step3.log"):
     """在板子上用 `at`/自建 double-fork 启动**完全脱离**本 SSH 通道的常驻进程。
 
     ⚠️ 直接 `cmd &` 会让 paramiko 的 exec 通道一直等后台进程的 stdout 关闭，
@@ -51,7 +52,7 @@ def do_daemon(cmd):
     try:
         launcher = "/tmp/_start_daemon.sh"
         body = "#!/bin/sh\ncd /root/smarttomato || exit 1\n" \
-               "exec setsid %s > step3.log 2>&1 < /dev/null\n" % cmd
+               "exec setsid %s > %s 2>&1 < /dev/null\n" % (cmd, log)
         sftp = c.open_sftp()
         with sftp.open(launcher, "w") as f:
             f.write(body)
@@ -123,7 +124,7 @@ if __name__ == "__main__":
     if op == "exec":
         raise SystemExit(do_exec(sys.argv[2]))
     elif op == "daemon":
-        raise SystemExit(do_daemon(sys.argv[2]))
+        do_daemon(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "step3.log")
     elif op == "put":
         do_put(sys.argv[2], sys.argv[3])
     elif op == "get":
